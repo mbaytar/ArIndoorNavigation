@@ -13,6 +13,7 @@ activityCompose = "1.10.0"
 composeBom = "2024.04.01"
 sceneformUx = "1.17.1"
 appcompat = "1.7.0"
+runtime = "1.0.0-alpha01"
 
 [libraries]
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraView" }
@@ -36,6 +37,7 @@ androidx-material3 = { group = "androidx.compose.material3", name = "material3" 
 sceneform-core = { module = "com.google.ar.sceneform:core", version.ref = "coreVersion" }
 sceneform-ux = { module = "com.google.ar.sceneform.ux:sceneform-ux", version.ref = "sceneformUx" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+androidx-runtime = { group = "androidx.xr.runtime", name = "runtime", version.ref = "runtime" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
