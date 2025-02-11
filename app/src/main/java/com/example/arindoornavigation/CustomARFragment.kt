@@ -1,5 +1,6 @@
 package com.example.arindoornavigation
 
+import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.widget.Toast
@@ -7,11 +8,14 @@ import com.google.ar.core.Anchor
 import com.google.ar.core.Plane
 import com.google.ar.core.Pose
 import com.google.ar.sceneform.AnchorNode
+import com.google.ar.sceneform.Node
 import com.google.ar.sceneform.ux.ArFragment
 import com.google.ar.sceneform.FrameTime
 import com.google.ar.sceneform.math.Vector3
 import com.google.ar.sceneform.rendering.MaterialFactory
 import com.google.ar.sceneform.rendering.ShapeFactory
+import kotlin.math.cos
+import kotlin.math.sin
 
 // Eğer Vector3 için operator overloading tanımlı değilse, aşağıdaki extensionları ekleyin.
 operator fun Vector3.plus(other: Vector3): Vector3 =
@@ -20,10 +24,39 @@ operator fun Vector3.plus(other: Vector3): Vector3 =
 operator fun Vector3.minus(other: Vector3): Vector3 =
     Vector3(this.x - other.x, this.y - other.y, this.z - other.z)
 
+/**
+ * Belirli bir açıda vektörü döndürmek için yardımcı fonksiyon.
+ * Açı, derece cinsindendir. (Pozitif değer saat yönünde, negatif saat tersi)
+ */
+fun rotateVector(v: Vector3, angleDegrees: Float): Vector3 {
+    val angleRad = Math.toRadians(angleDegrees.toDouble())
+    val cos = cos(angleRad).toFloat()
+    val sin = sin(angleRad).toFloat()
+    // x ve z düzlemi üzerinde dönüş
+    return Vector3(
+        v.x * cos - v.z * sin,
+        0f,
+        v.x * sin + v.z * cos
+    )
+}
+
+/**
+ * CustomARFragment artık rota adımlarını argüman olarak alabilir.
+ */
 class CustomARFragment : ArFragment() {
 
     companion object {
         private const val TAG = "kars"
+        private const val ARG_ROUTE_STEPS = "route_steps"
+
+        // Yeni instance oluşturmak için factory method.
+        fun newInstance(routeSteps: ArrayList<RouteStep>): CustomARFragment {
+            val fragment = CustomARFragment()
+            val bundle = Bundle()
+            bundle.putSerializable(ARG_ROUTE_STEPS, routeSteps)
+            fragment.arguments = bundle
+            return fragment
+        }
     }
 
     // Başlangıç noktası seçildikten sonra saklanacak anchor.
@@ -31,14 +64,26 @@ class CustomARFragment : ArFragment() {
     // Zeminin tespit edildiğini ve ekrana dokunulması gerektiğini bildiren toast mesajının yalnızca bir kere gösterilmesini sağlar.
     private var tapToastShown = false
 
-    override fun onViewCreated(view: View, savedInstanceState: android.os.Bundle?) {
+    // Rota adımlarını tutacak değişken.
+    private var routeSteps: List<RouteStep>? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Argümanlardan rota adımlarını alıyoruz.
+        @Suppress("UNCHECKED_CAST")
+        routeSteps = arguments?.getSerializable(ARG_ROUTE_STEPS) as? List<RouteStep>
+        Log.d(TAG, "Rota adımları alındı: $routeSteps")
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         // Zemini tespit ettikten sonra, kullanıcı ekrana dokunarak başlangıç noktasını seçsin.
         setOnTapArPlaneListener { hitResult, plane, motionEvent ->
             if (startingAnchor == null) {
                 startingAnchor = hitResult.createAnchor()
                 Toast.makeText(requireContext(), "Başlangıç noktası seçildi", Toast.LENGTH_SHORT).show()
-                Log.d(TAG, "kars: Starting point selected")
+                Log.d(TAG, "Başlangıç noktası seçildi")
+                // Rota adımlarına göre marker’ları yerleştir.
                 placeRouteMarkersStartingAt(startingAnchor!!)
             }
         }
@@ -52,7 +97,7 @@ class CustomARFragment : ArFragment() {
             if (planes != null && planes.any { it.trackingState == com.google.ar.core.TrackingState.TRACKING && it.type == Plane.Type.HORIZONTAL_UPWARD_FACING }) {
                 if (!tapToastShown) {
                     Toast.makeText(requireContext(), "Başlangıç noktasını seçmek için ekrana dokunun", Toast.LENGTH_LONG).show()
-                    Log.d(TAG, "kars: Tap toast shown")
+                    Log.d(TAG, "Dokunma mesajı gösterildi")
                     tapToastShown = true
                 }
             }
@@ -61,53 +106,77 @@ class CustomARFragment : ArFragment() {
 
     /**
      * placeRouteMarkersStartingAt:
-     * - Seçilen başlangıç noktasını (anchor) referans alarak rota oluşturur.
-     * - Kameranın yönünden (yatay bileşeni 0 alınarak) forward ve right vektörleri hesaplanır.
-     * - Rota:
-     *      Segment 1: P1 = S + forward * 2   (2 m düz)
-     *      Segment 2: P2 = P1 + right * 3     (3 m sağa)
-     *      Segment 3: P3 = P2 - forward * 2   (2 m düz, yani ikinci sağa dönüş uygulanmış olur)
+     * - Seçilen başlangıç noktasını (anchor) referans alarak, rota adımlarını kullanır.
+     * - İlk adımda, kameranın ileri vektörü (forward) mevcut yön olarak alınır.
+     * - Her adımda, yön bilgisine göre mevcut yön güncellenir (örneğin; sağa dönmek için 90° döndürülür)
+     * - Güncellenen yön ile belirtilen mesafe kadar ilerlenip yeni nokta hesaplanır.
      * - Her segment arasında 20 cm aralıkla marker noktaları hesaplanır.
      * - Varış noktasında büyük kırmızı, diğer marker'lar için küçük mavi marker kullanılır.
      */
     private fun placeRouteMarkersStartingAt(anchor: Anchor) {
         val startPose = anchor.pose
         val S = Vector3(startPose.tx(), startPose.ty(), startPose.tz())
-        Log.d(TAG, "kars: Starting pose: $S")
+        Log.d(TAG, "Başlangıç pozisyonu: $S")
 
-        // Alınan anlık kamera pose'undan forward (ileri) vektörünü hesaplıyoruz.
+        // Kameranın anlık pozunu alıyoruz.
         val camPose = arSceneView.arFrame?.camera?.pose
         if (camPose == null) {
-            Log.d(TAG, "kars: Camera pose is null, cannot compute route.")
+            Log.d(TAG, "Kamera pozisyonu null, rota hesaplanamıyor.")
             return
         }
         // ARCore’da kameranın -z ekseni ileri yönü temsil eder.
         val camZ = camPose.zAxis  // float[3]
         val forward = Vector3(-camZ[0], 0f, -camZ[2]).normalized()
-        // Sağ yönü elde etmek için, right = Vector3(-forward.z, 0, forward.x)
-        val right = Vector3(-forward.z, 0f, forward.x).normalized()
+        Log.d(TAG, "İlk ileri vektör: $forward")
 
-        Log.d(TAG, "kars: forward vector: $forward, right vector: $right")
+        if (routeSteps.isNullOrEmpty()) {
+            Log.d(TAG, "Rota adımı yok, marker yerleştirme atlanıyor.")
+            return
+        }
 
-        // Rota hesaplaması:
-        // Segment 1: P1 = S + forward * 2
-        val P1 = S + forward.scaled(2f)
-        // Segment 2: P2 = P1 + right * 3
-        val P2 = P1 + right.scaled(3f)
-        // Segment 3: P3 = P2 - forward * 2  (İkinci sağa dönüş için: ikinci dönüş yönü, -forward)
-        val P3 = P2 - forward.scaled(2f)
+        // Başlangıç noktasından başlayarak her adım için son noktayı hesaplıyoruz.
+        val points = mutableListOf<Vector3>()
+        points.add(S)
+        var currentPoint = S
+        // Mevcut yönü, ilk başta kameranın ileri vektörü olarak belirliyoruz.
+        var currentHeading = forward
 
-        Log.d(TAG, "kars: Route points: S=$S, P1=$P1, P2=$P2, P3=$P3")
+        for (step in routeSteps!!) {
+            // Yön bilgisine göre mevcut yönü güncelleyelim.
+            when (step.direction) {
+                "ileri" -> {
+                    // Hiçbir dönüş yok, mevcut yön korunur.
+                }
+                "geri" -> {
+                    // 180° dönüş (ters yönde ilerleme)
+                    currentHeading = currentHeading.scaled(-1f)
+                }
+                "sağ" -> {
+                    // Saat yönünde 90° dönüş (sağa dön)
+                    currentHeading = rotateVector(currentHeading, 90f)
+                }
+                "sol" -> {
+                    // Saat tersi 90° dönüş (sola dön)
+                    currentHeading = rotateVector(currentHeading, -90f)
+                }
+                else -> {
+                    Log.d(TAG, "Bilinmeyen yön '${step.direction}' atlandı.")
+                }
+            }
+            // Güncellenen yön ile belirtilen mesafe kadar ilerleyelim.
+            val offset = currentHeading.scaled(step.distance)
+            currentPoint += offset
+            points.add(currentPoint)
+        }
+        Log.d(TAG, "Hesaplanan rota noktaları: $points")
 
-        // Aradaki marker aralığı: 20 cm
+        // Marker aralığı: 20 cm
         val spacing = 0.2f
-
-        // İki nokta arasında lineer interpolasyon yaparak marker noktalarını döndüren fonksiyon.
         fun interpolatePoints(start: Vector3, end: Vector3): List<Vector3> {
-            val diff = Vector3.subtract(end, start)
+            val diff = Vector3(end.x - start.x, end.y - start.y, end.z - start.z)
             val dist = diff.length()
-            val count = (dist / spacing).toInt()
-            val points = mutableListOf<Vector3>()
+            val count = (dist / spacing).toInt().coerceAtLeast(1)
+            val pointsList = mutableListOf<Vector3>()
             for (i in 0..count) {
                 val t = i.toFloat() / count.toFloat()
                 val interp = Vector3(
@@ -115,56 +184,47 @@ class CustomARFragment : ArFragment() {
                     start.y + t * (end.y - start.y),
                     start.z + t * (end.z - start.z)
                 )
-                points.add(interp)
+                pointsList.add(interp)
             }
-            return points
+            return pointsList
         }
 
-        // Segmentler için marker noktalarını oluşturuyoruz.
+        // Tüm segmentler için marker pozisyonlarını hesapla.
         val markersPositions = mutableListOf<Vector3>()
-        markersPositions.addAll(interpolatePoints(S, P1))
-        markersPositions.addAll(interpolatePoints(P1, P2))
-        markersPositions.addAll(interpolatePoints(P2, P3))
+        for (i in 0 until points.size - 1) {
+            markersPositions.addAll(interpolatePoints(points[i], points[i + 1]))
+        }
 
-        // Oluşturulacak marker renderable'larını hazırlıyoruz:
-        // Küçük marker: mavi renkli, yarıçap 0.01 m
+        // Marker renderable'ları oluşturuluyor:
         MaterialFactory.makeOpaqueWithColor(requireContext(), com.google.ar.sceneform.rendering.Color(android.graphics.Color.BLUE))
             .thenAccept { blueMaterial ->
                 val smallMarkerRenderable = ShapeFactory.makeSphere(0.01f, Vector3.zero(), blueMaterial)
-                // Varış marker'ı: kırmızı renkli, yarıçap 0.05 m
                 MaterialFactory.makeOpaqueWithColor(requireContext(), com.google.ar.sceneform.rendering.Color(android.graphics.Color.RED))
                     .thenAccept { redMaterial ->
                         val finishMarkerRenderable = ShapeFactory.makeSphere(0.05f, Vector3.zero(), redMaterial)
-                        // Her marker için:
                         for ((index, pos) in markersPositions.withIndex()) {
-                            // Marker dünya pozisyonu: y değerini başlangıç noktasının y değeri olarak alıyoruz.
                             val markerPose = Pose.makeTranslation(pos.x, S.y, pos.z)
                             val markerAnchor = arSceneView.session?.createAnchor(markerPose)
                             if (markerAnchor == null) {
-                                Log.d(TAG, "kars: Failed to create anchor for marker index $index")
+                                Log.d(TAG, "Marker için anchor oluşturulamadı, index: $index")
                                 continue
                             }
                             val anchorNode = AnchorNode(markerAnchor)
                             anchorNode.setParent(arSceneView.scene)
-                            val markerNode = com.google.ar.sceneform.Node()
+                            val markerNode = Node()
                             markerNode.setParent(anchorNode)
-                            // Son marker (varış) için kırmızı renderable, diğerleri için mavi.
-                            if (index == markersPositions.size - 1) {
-                                markerNode.renderable = finishMarkerRenderable
-                            } else {
-                                markerNode.renderable = smallMarkerRenderable
-                            }
-                            Log.d(TAG, "kars: Placed marker at (${pos.x}, ${S.y}, ${pos.z}) for index $index")
+                            markerNode.renderable = if (index == markersPositions.size - 1) finishMarkerRenderable else smallMarkerRenderable
+                            Log.d(TAG, "Marker yerleştirildi: (${pos.x}, ${S.y}, ${pos.z}), index: $index")
                         }
-                        Log.d(TAG, "kars: All route markers placed")
+                        Log.d(TAG, "Tüm rota marker'ları yerleştirildi")
                     }
                     .exceptionally { throwable ->
-                        Log.e(TAG, "kars: Error creating finish marker renderable", throwable)
+                        Log.e(TAG, "Varış marker'ı oluşturulurken hata", throwable)
                         null
                     }
             }
             .exceptionally { throwable ->
-                Log.e(TAG, "kars: Error creating marker renderable", throwable)
+                Log.e(TAG, "Marker oluşturulurken hata", throwable)
                 null
             }
     }
