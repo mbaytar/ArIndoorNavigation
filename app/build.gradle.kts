@@ -51,6 +51,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.runtime)
+    implementation(libs.assets)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -66,4 +67,6 @@ dependencies {
     implementation(libs.core)
     implementation(libs.sceneform.core)
     implementation(libs.sceneform.ux)
+    implementation (libs.sceneform.core)
+    implementation (libs.sceneform.ux)
 }
